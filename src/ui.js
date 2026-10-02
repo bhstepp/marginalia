@@ -174,6 +174,18 @@
       var s1 = null; try { s1 = JSON.parse(lsGet(STATS_KEY) || 'null'); } catch (e) { }
       o.runs = (s1 && s1.runs) || 0; o.wins = (s1 && s1.wins) || 0;
     }
+    if (!o.v1migr) {   // wins from before characters existed were all Knight wins: credit them once
+      var s2 = null; try { s2 = JSON.parse(lsGet(STATS_KEY) || 'null'); } catch (e) { }
+      var add = function (id) { if (o.ach.indexOf(id) < 0) o.ach.push(id); };
+      if (s2 && s2.wins > 0) {
+        ['win_knight', 'quire_one', 'quire_two'].forEach(add);
+        var pc0 = o.perChar.knight = o.perChar.knight || { runs: 0, wins: 0, best: 0 };
+        pc0.wins = Math.max(pc0.wins || 0, s2.wins); pc0.runs = Math.max(pc0.runs || 0, s2.runs || 0); pc0.best = Math.max(pc0.best || 0, s2.best || 0);
+      }
+      if (s2 && s2.daily && Object.keys(s2.daily).some(function (d) { return s2.daily[d] && s2.daily[d].won; })) add('daily_win');
+      o.v1migr = 1;
+      try { lsSet(BOOK_KEY, JSON.stringify(o)); } catch (e) { }
+    }
     return o;
   }
   var book = loadBook();

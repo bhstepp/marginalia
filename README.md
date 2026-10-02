@@ -31,6 +31,9 @@ The Apocalypse) with three bosses: the Great Snail, the Scribe's Cat, and the Bo
 Push this repo, then **Settings → Pages → Deploy from a branch → `main` / root**. `index.html` at the
 root is the whole game.
 
+## Install on iPhone
+Open the GitHub Pages URL in Safari → Share → **Add to Home Screen**. It launches full-screen like an app, with its own icon (`icon-180.png`, `manifest.webmanifest`).
+
 ## Development
 Requires Node 18+. Source is in `src/`; `node build.js` bundles it into `index.html` (and `dist/index.html`).
 
