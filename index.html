@@ -8,8 +8,13 @@
 <meta name="theme-color" content="#e9dab5">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
-<script>try{if(navigator.standalone||matchMedia("(display-mode: standalone)").matches)document.documentElement.classList.add("standalone")}catch(e){}
-(function(){function v(){document.documentElement.style.setProperty("--vh",(window.innerHeight/100)+"px")}v();addEventListener("resize",v);addEventListener("orientationchange",function(){setTimeout(v,300)})})();</script>
+<script>(function(){var d=document.documentElement,sa=false;
+try{sa=!!(navigator.standalone||matchMedia("(display-mode: standalone)").matches||matchMedia("(display-mode: fullscreen)").matches)}catch(e){}
+if(sa)d.classList.add("standalone");
+/* Home-Screen web apps on iOS report a viewport as if Safari's toolbar were still there; size from the real screen instead. */
+function v(){var h=innerHeight;if(sa&&screen&&screen.height){var port=innerHeight>=innerWidth,sh=port?Math.max(screen.width,screen.height):Math.min(screen.width,screen.height);if(sh>h)h=sh}
+d.style.setProperty("--app-h",h+"px");d.style.setProperty("--vh",(h/100)+"px")}
+v();addEventListener("resize",v);addEventListener("orientationchange",function(){setTimeout(v,300)})})();</script>
 <meta name="format-detection" content="telephone=no">
 <meta name="description" content="Marginalia — a roguelike deckbuilder in the margins of a medieval manuscript.">
 <title>Marginalia</title>
@@ -877,6 +882,9 @@ h1, h2, h3 { margin: 0; font-weight: 400; }
   :root { --sat: max(env(safe-area-inset-top, 0px) + 10px, 30px); --sab: max(env(safe-area-inset-bottom, 0px), 8px); }
 }
 html.standalone { --sat: max(env(safe-area-inset-top, 0px) + 10px, 30px); --sab: max(env(safe-area-inset-bottom, 0px), 8px); }
+
+html.standalone, html.standalone body { height: var(--app-h, 100%); }
+html.standalone body, html.standalone #app, html.standalone #fxl, html.standalone #ovl, html.standalone #rotate { bottom: auto; height: var(--app-h, 100%); }
 </style></head>
 <body><div id="app"></div><div id="rotate"><div><b>Marginalia</b>Turn thy device upright, Sir Knight.</div></div><div id="fxl" aria-hidden="true"></div><div id="ovl"></div>
 <script>/* ==== engine.js ==== */
