@@ -51,8 +51,18 @@ node smoke.js 300                 # random-play crash test
 node tools/validate_content.js    # card/relic/event schema checks
 node tools/validate_enemies.js    # bestiary checks + damage table
 node tools/stress_content.js      # exercises every card, relic, event and encounter
+node tools/math_audit.js          # printed card/intent numbers vs real damage & Ward under every status combo
+node tools/diag_test.js           # tests for the in-game diagnostics log (clean runs, negative controls, persistence)
 node tools/sim.js 400             # heuristic bot balance report (~2 min)
 node tools/sim.js 300 --char nun --asc 5 --bosses   # per character / Rubrication; --bosses = paired boss bench
                                   # (--unlocked=none for a fresh player; default all achievements unlocked)
 node tools/qa.js play             # Playwright tap-through on an iPhone viewport
 ```
+
+## Diagnostics (bug reports)
+The game keeps a small private log of the current run: every card played (with the text printed on it and what it really
+did), every enemy turn (with the intent shown and the damage dealt), errors, and the seed. It auto-flags any place where
+a printed number differs from what happened. Nothing is sent anywhere.
+
+To report a problem: **Menu → Diagnostics → Copy report** (or **View**, then select all), and paste it into the chat.
+The log keeps roughly the last fight or two, is stored on the device (`marginalia.diag.v1`), and starts fresh with each new run.

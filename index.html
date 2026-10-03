@@ -911,7 +911,7 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
   };
   M.STATUS = {
     might:    { name: 'Might',    good: true,  desc: 'Attacks deal +N damage per hit.' },
-    resolve:  { name: 'Resolve',  good: true,  desc: 'Gain +N Ward whenever you gain Ward from a card.' },
+    resolve:  { name: 'Resolve',  good: true,  desc: 'Gain +N extra Ward whenever you gain Ward from a card, Gloss or relic.' },
     corrode:  { name: 'Corrode',  good: false, desc: 'At the start of its turn, loses N HP (ignores Ward), then Corrode drops by 1.' },
     smudged:  { name: 'Smudged',  good: false, desc: 'Deals 25% less attack damage. Wears off by 1 each turn.' },
     torn:     { name: 'Torn',     good: false, desc: 'Takes 50% more attack damage. Wears off by 1 each turn.' },
@@ -1251,9 +1251,16 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
     if (!mv) return { kinds: ['unknown'] };
     var info = { kinds: [], name: mv.name || '', dmg: 0, times: 0 };
     var ei = st.combat.enemies.indexOf(e);
+    var ov = { srcMight: 0, srcSmudged: false, tgtTorn: false }; // effects the move applies before its strike lands
     var scan = function (ops) {
       ops.forEach(function (o) {
-        if (o.op === 'dmg') { info.dmg = calcDmg(st, ei, 'p', o.n, true); info.times += (o.times || 1); add('attack'); }
+        if (o.op === 'apply' && o.n > 0) {
+          var selfish = (o.target === 'self' || o.target === 'allies');
+          if (selfish && o.s === 'might') ov.srcMight += o.n;
+          if (selfish && o.s === 'smudged') ov.srcSmudged = true;
+          if (!selfish && o.s === 'torn') ov.tgtTorn = true;
+        }
+        if (o.op === 'dmg') { info.dmg = calcDmg(st, ei, 'p', o.n, true, ov); info.times += (o.times || 1); add('attack'); }
         else if (o.op === 'ward') add('defend');
         else if (o.op === 'apply') add((o.target === 'self' || o.target === 'allies') ? 'buff' : 'debuff');
         else if (o.op === 'heal') add('buff');
@@ -1271,16 +1278,26 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
     return info;
   };
 
-  function calcDmg(st, src, tgt, base, isAttack) {
+  // ov (optional, previews only): {srcMight, srcSmudged, tgtTorn} = effects that an earlier op of the SAME card/move
+  // will have applied by the time this hit lands (e.g. Couched Lance applies Torn before it strikes).
+  function calcDmg(st, src, tgt, base, isAttack, ov) {
     var n = base;
     if (isAttack && src != null) {
-      n += stv(st, src, 'might');
-      if (stv(st, src, 'smudged') > 0) n = Math.floor(n * 0.75);
-      if (tgt != null && stv(st, tgt, 'torn') > 0) n = Math.floor(n * 1.5);
+      n += stv(st, src, 'might') + ((ov && ov.srcMight) || 0);
+      if (stv(st, src, 'smudged') > 0 || (ov && ov.srcSmudged)) n = Math.floor(n * 0.75);
+      if ((tgt != null && stv(st, tgt, 'torn') > 0) || (ov && ov.tgtTorn)) n = Math.floor(n * 1.5);
     }
     return Math.max(0, n);
   }
   M.calcDmg = calcDmg;
+  // Ward actually gained for a nominal amount (Resolve first, then Faded x0.75). Pure: used by gainWard and card text.
+  function calcWard(st, ref, n, fromCard) {
+    var a = actor(st, ref); if (!a) return n;
+    if (fromCard) n += (a.st.resolve || 0);
+    if ((a.st.faded || 0) > 0) n = Math.floor(n * 0.75);
+    return Math.max(0, n);
+  }
+  M.calcWard = calcWard;
 
   function dealDamage(st, src, tgt, base, isAttack) {
     var c = st.combat; if (!c || c.over) return 0;
@@ -1320,9 +1337,7 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
 
   function gainWard(st, ref, n, fromCard) {
     var a = actor(st, ref); if (!a) return;
-    if (fromCard) n += (a.st.resolve || 0);
-    if ((a.st.faded || 0) > 0) n = Math.floor(n * 0.75);
-    n = Math.max(0, n);
+    n = calcWard(st, ref, n, fromCard);
     a.ward += n;
     if (ref === 'p' && a.ward > st.stats.maxWard) st.stats.maxWard = a.ward;
     fx(st, { k: 'ward', tgt: ref === 'p' ? 'p' : st.combat.enemies[ref].uid, n: n });
@@ -1636,6 +1651,7 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
           ts = resolveTargets(st, ctx, o, 'enemy');
           ts.forEach(function (t) {
             var base = o.op === 'dmg' ? o.n : (o.base || 0) + (o.mult || 1) * perValue(st, ctx, o.per, t);
+            if (o.op === 'dmgPer' && base <= 0) return; // "N per X" with nothing to count deals no damage (Might must not leak in)
             dealDamage(st, s, t, base, true);
           });
           checkEnd(st);
@@ -2037,21 +2053,42 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
   function cardName(id) { return M.CARDS[id] ? M.CARDS[id].name : id; }
   function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
 
-  function describeOps(ops, ctx) {
+  // Build the rule sentences for an op list. `ov` tracks effects an EARLIER op in the same list will already have
+  // applied when a later op resolves (e.g. Couched Lance applies Torn, then strikes) so printed numbers are true.
+  function describeList(ops, ctx, ov) {
     var out = [];
+    ov = ov || { srcMight: 0, srcResolve: 0, tornAll: false, tornChosen: false };
+    var inC = !!(ctx && ctx.st && ctx.st.combat);
+    // In combat, if every living foe is already Torn, the printed damage can include that bonus whoever is struck.
+    var allTorn = false;
+    if (inC) { var lv = ctx.st.combat.enemies.filter(function (e) { return !e.dead; }); allTorn = lv.length > 0 && lv.every(function (e) { return (e.st.torn || 0) > 0; }); }
     (ops || []).forEach(function (o) {
       var t = '';
       var tgtTxt = o.target === 'all' ? ' to ALL foes' : o.target === 'random' ? ' to a random foe' : '';
       switch (o.op) {
         case 'dmg':
+          var chosen = !o.target || o.target === 'enemy';
+          var tornNow = allTorn || ov.tornAll || (chosen && ov.tornChosen);
           var n = o.n;
-          if (ctx && ctx.st && ctx.st.combat) n = calcDmg(ctx.st, 'p', null, o.n, true);
-          var cls = (ctx && n > o.n) ? ' class="up"' : (ctx && n < o.n) ? ' class="down"' : '';
+          if (inC) n = calcDmg(ctx.st, 'p', null, o.n, true, { srcMight: ov.srcMight, tgtTorn: tornNow });
+          else { n = o.n + ov.srcMight; if (tornNow) n = Math.floor(n * 1.5); }
+          var cls = n > o.n ? ' class="up"' : n < o.n ? ' class="down"' : '';
           t = 'Deal <b' + cls + '>' + n + '</b> damage' + tgtTxt + ((o.times || 1) > 1 ? ' <b>' + o.times + '</b> times' : ''); break;
         case 'dmgPer': t = 'Deal ' + (o.base ? '<b>' + o.base + '</b> damage plus ' : '') + '<b>' + (o.mult || 1) + '</b>' + (o.base ? '' : ' damage') + ' per ' + PER_TXT[o.per] + tgtTxt; break;
-        case 'ward': t = (o.target === 'allies' ? 'All foes gain ' : 'Gain ') + '<b>' + o.n + '</b> Ward'; break;
+        case 'ward':
+          if (o.target === 'allies') { t = 'All foes gain <b>' + o.n + '</b> Ward'; break; }
+          var wn = inC ? calcWard(ctx.st, 'p', o.n + ov.srcResolve, true) : o.n + ov.srcResolve; // Resolve gained earlier on this card counts
+          var wcls = wn > o.n ? ' class="up"' : wn < o.n ? ' class="down"' : '';
+          t = 'Gain <b' + wcls + '>' + wn + '</b> Ward'; break;
         case 'wardPer': t = 'Gain ' + (o.base ? '<b>' + o.base + '</b> Ward plus ' : '') + '<b>' + (o.mult || 1) + '</b>' + (o.base ? '' : ' Ward') + ' per ' + PER_TXT[o.per]; break;
-        case 'apply': t = o.target === 'self' ? 'Gain <b>' + o.n + '</b> ' + sName(o.s) : 'Apply <b>' + o.n + '</b> ' + sName(o.s) + tgtTxt; break;
+        case 'apply':
+          t = o.target === 'self' ? 'Gain <b>' + o.n + '</b> ' + sName(o.s) : 'Apply <b>' + o.n + '</b> ' + sName(o.s) + tgtTxt;
+          if (o.n > 0) {
+            if (o.s === 'might' && o.target === 'self') ov.srcMight += o.n;
+            if (o.s === 'resolve' && o.target === 'self') ov.srcResolve += o.n;
+            if (o.s === 'torn' && o.target !== 'self') { if (o.target === 'all') ov.tornAll = true; else if (!o.target || o.target === 'enemy') ov.tornChosen = true; }
+          }
+          break;
         case 'doubleStatus': t = ((o.mult || 2) === 2 ? 'Double' : 'Multiply by ' + o.mult) + ' the ' + sName(o.s) + ' on ' + (o.target === 'all' ? 'ALL foes' : 'the target'); break;
         case 'removeStatus': t = (o.target && o.target !== 'self') ? 'Remove the ' + sName(o.s) + ' from ' + (o.target === 'all' ? 'ALL foes' : 'the target') : 'Remove your ' + sName(o.s); break;
         case 'draw': t = 'Draw <b>' + o.n + '</b> card' + (o.n === 1 ? '' : 's'); break;
@@ -2060,7 +2097,7 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
         case 'heal': t = 'Heal <b>' + o.n + '</b> HP'; break;
         case 'loseHp': t = 'Lose <b>' + o.n + '</b> HP'; break;
         case 'addCard': t = 'Add ' + ((o.n || 1) > 1 ? o.n + ' ' : 'a ') + (o.up ? 'gilded ' : '') + cardName(o.id) + ' to your ' + ({ hand: 'hand', draw: 'draw pile', discard: 'discard pile' }[o.to || 'discard']); break;
-        case 'scrapeBlots': t = 'Scrape all Blots in your hand' + (o.draw ? ' and draw 1 card for each' : ''); break;
+        case 'scrapeBlots': t = o.short ? 'Scrape Blots in hand' + (o.draw ? '; draw 1 for each' : '') : 'Scrape all Blots in your hand' + (o.draw ? ' and draw 1 card for each' : ''); break; // short: tight Gloss cards
         case 'gildHand': t = 'Gild ' + (o.n === 'all' ? 'ALL cards' : plural(o.n || 1, 'random card')) + ' in your hand for this fight'; break;
         case 'createCard':
           var what = (o.rarity ? o.rarity + ' ' : 'random ') + (o.pig ? M.PIGMENTS[o.pig].name + ' ' : '') + (o.type || 'card');
@@ -2073,20 +2110,25 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
           if (!ct && o.cond.indexOf('played:') === 0) ct = '<i>After ' + M.PIGMENTS[o.cond.split(':')[1]].name + ':</i>';
           if (!ct && o.cond.indexOf('goldAtLeast:') === 0) ct = 'If you have ' + o.cond.split(':')[1] + '+ silver,';
           if (!ct && o.cond.indexOf('wardAtLeast:') === 0) ct = 'If you have ' + o.cond.split(':')[1] + '+ Ward,';
-          t = ct + ' ' + lc(describeOps(o.then, ctx)) + (o.else && o.else.length ? '. Otherwise, ' + lc(describeOps(o.else, ctx)) : ''); break;
-        case 'repeat': t = describeOps(o.ops, ctx) + ' (' + o.n + ' times)'; break;
-        case 'nextTurn': t = 'Next turn, ' + lc(describeOps(o.ops, ctx)); break;
+          // every effect inside the condition belongs to it: "If X, do A and B" (never a bare trailing sentence)
+          var cp = function (x) { return { srcMight: x.srcMight, srcResolve: x.srcResolve, tornAll: x.tornAll, tornChosen: x.tornChosen }; };
+          var thenTxt = joinAnd(describeList(o.then, ctx, cp(ov)).map(lc));
+          t = ct + ' ' + thenTxt + (o.else && o.else.length ? '. Otherwise, ' + joinAnd(describeList(o.else, ctx, cp(ov)).map(lc)) : ''); break;
+        case 'repeat': t = describeList(o.ops, ctx, ov).join('. ') + ' (' + o.n + ' times)'; break;
+        case 'nextTurn': t = 'Next turn, ' + joinAnd(describeList(o.ops, ctx, { srcMight: 0, srcResolve: 0, tornAll: false, tornChosen: false }).map(lc)); break;
         case 'gold': t = (o.n >= 0 ? 'Gain ' : 'Lose ') + '<b>' + Math.abs(o.n) + '</b> silver'; break;
         default: t = '';
       }
       if (t) out.push(t);
     });
-    return out.join('. ');
+    return out;
   }
+  function joinAnd(a) { return a.length < 2 ? (a[0] || '') : a.length === 2 ? a[0] + ' and ' + a[1] : a.slice(0, -1).join(', ') + ', and ' + a[a.length - 1]; }
+  function describeOps(ops, ctx) { return describeList(ops, ctx).join('. '); }
   function lc(s) { return s ? s.charAt(0).toLowerCase() + s.slice(1) : s; }
   M.describeOps = describeOps;
 
-  function hookText(h) {
+  function hookText(h, ctx) {
     var w;
     var everyTxt = h.every ? 'every ' + ordinal(h.every) + ' time ' : '';
     switch (h.on) {
@@ -2106,7 +2148,7 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
     }
     if (h.every && ['illuminate', 'play', 'hurt'].indexOf(h.on) < 0) w = w + ' (every ' + ordinal(h.every) + ' time)';
     void everyTxt;
-    return w + ', ' + lc(describeOps(h.ops));
+    return w + ', ' + lc(describeOps(h.ops, ctx));
   }
   function ordinal(n) { return n + (n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th'); }
   M.hookText = hookText;
@@ -2116,9 +2158,10 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
     var d = cardDef(inst);
     if (d.text) return d.text;
     var parts = [];
-    var body = describeOps(d.ops, st && st.combat ? { st: st } : null);
+    var tctx = st && st.combat ? { st: st } : null;
+    var body = describeOps(d.ops, tctx);
     if (body) parts.push(body + '.');
-    if (d.gloss) (Array.isArray(d.gloss) ? d.gloss : [d.gloss]).forEach(function (h) { parts.push('<i>Gloss:</i> ' + hookText(h) + '.'); });
+    if (d.gloss) (Array.isArray(d.gloss) ? d.gloss : [d.gloss]).forEach(function (h) { parts.push('<i>Gloss:</i> ' + hookText(h, tctx) + '.'); });
     if (d.onDraw) parts.push('When drawn, ' + lc(describeOps(d.onDraw)) + '.');
     if (d.endTurn) parts.push('If in hand at end of turn, ' + lc(describeOps(d.endTurn)) + '.');
     var kw = [];
@@ -3563,10 +3606,8 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
       up: { gloss: { on: 'play', every: 3, ops: [dmg(6, { target: 'all' })] } },
       flavor: 'Monkey see, monkey copy, monkey stab.' },
     scr_correctors_mark: { name: 'Corrector’s Mark', pigment: 'L', type: 'gloss', rarity: 'uncommon', cost: 1,
-      gloss: { on: 'turnStart', ops: [ward(4), { op: 'scrapeBlots', draw: true }] },
-      up: { gloss: { on: 'turnStart', ops: [ward(6), { op: 'scrapeBlots', draw: true }] },
-        text: '<i>Gloss:</i> At the start of your turn, gain <b>6</b> Ward. Scrape Blots in hand; draw 1 for each.' },
-      text: '<i>Gloss:</i> At the start of your turn, gain <b>4</b> Ward. Scrape Blots in hand; draw 1 for each.',
+      gloss: { on: 'turnStart', ops: [ward(4), { op: 'scrapeBlots', draw: true, short: true }] },
+up: { gloss: { on: 'turnStart', ops: [ward(6), { op: 'scrapeBlots', draw: true, short: true }] } },
       flavor: 'A tiny cross in the margin: someone has erred.' },
     scr_steady_hand: { name: 'Steady Hand', pigment: 'N', type: 'gloss', rarity: 'uncommon', cost: 1,
       gloss: { on: 'turnStart', ops: [iff('marginFull', [ink(1)])] }, up: { cost: 0 },
@@ -3594,9 +3635,7 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
       up: { ops: [dmg(13, { target: 'all' }), iff('marginFull', [dmg(13, { target: 'all' })])] },
       flavor: '"Here it ends." It usually does, for them.' },
     scr_spilled_ink: { name: 'Spilled Inkhorn', pigment: 'V', type: 'attack', rarity: 'rare', cost: 1, unlock: 'triple_kill',
-      ops: [dmg(6, { target: 'all', times: 2 }), blot('ink_blot', 2)], up: { ops: [dmg(8, { target: 'all', times: 2 }), blot('ink_blot', 2)],
-        text: 'Deal <b>8</b> damage to ALL foes <b>2</b> times. Add 2 Ink Blots to your discard pile.' },
-      text: 'Deal <b>6</b> damage to ALL foes <b>2</b> times. Add 2 Ink Blots to your discard pile.',
+      ops: [dmg(6, { target: 'all', times: 2 }), blot('ink_blot', 2)], up: { ops: [dmg(8, { target: 'all', times: 2 }), blot('ink_blot', 2)] },
       flavor: 'An accident. A glorious, deliberate accident.' },
     scr_midnight_oil: { name: 'Midnight Oil', pigment: 'N', type: 'skill', rarity: 'rare', cost: 0, scrape: true,
       ops: [ink(2), draw(2), blot('ink_blot', 1, 'hand')], up: { ops: [ink(2), draw(3), blot('ink_blot', 1, 'hand')],
@@ -5130,6 +5169,330 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
 })();
 
 ;
+/* ==== diag.js ==== */
+/* Marginalia — diagnostics log. Pure logic, no DOM except optional persistence/reporting hooks.
+   Records what happened in the current run (card plays, enemy turns, state changes) and AUTO-FLAGS anything where the
+   number the player was shown differs from what actually happened, so a pasted report is enough to diagnose a bug.
+
+   Opt-in:  M.diag.install()  wraps M.act (ui.js calls it at boot; Node tests call it explicitly).
+   Report:  M.diag.report(st)  -> plain text (header, flags, errors, newest-last JSON-lines log).
+   Storage: the newest ~56 KB of entries are kept in localStorage ('marginalia.diag.v1'); a new run starts a fresh log.
+   Nothing leaves the device unless the player copies the report themselves. */
+(function () {
+  var G = (typeof globalThis !== 'undefined') ? globalThis : window;
+  var M = G.M = G.M || {};
+  var KEY = 'marginalia.diag.v1', VERSION = 1, CAP = 56000, MAXFLAGS = 40, MAXERRS = 12;
+  var D = M.diag = { VERSION: VERSION };
+
+  var buf = fresh(), size = 0, lastSt = null, lastCombat = null;
+  var installed = false, origAct = null, origConsoleErr = null, timer = null, loaded = false;
+
+  function fresh() { return { v: VERSION, run: null, entries: [], flags: [], flagCount: 0, errs: [], seq: 0, dropped: 0 }; }
+  function strip(s) { return String(s == null ? '' : s).replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim(); }
+  function cid(inst) { return inst.id + (inst.up ? '+' : ''); }
+  function nz(o) { var r = {}, k, any = false; for (k in (o || {})) if (o[k]) { r[k] = o[k]; any = true; } return any ? r : undefined; }
+  function prune(e) {
+    var k; for (k in e) { var v = e[k]; if (v === undefined || v === null || v === false || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length)) delete e[k]; }
+    return e;
+  }
+  function ls() { try { return G.localStorage || null; } catch (e) { return null; } }
+
+  // ---------------------------------------------------------------- persistence
+  function load() {
+    loaded = true;
+    var L = ls(); if (!L) return;
+    try {
+      var o = JSON.parse(L.getItem(KEY) || 'null');
+      if (o && o.v === VERSION && Array.isArray(o.entries)) { buf = o; size = 0; buf.entries.forEach(function (e) { size += JSON.stringify(e).length; }); }
+    } catch (e) { }
+  }
+  function save() {
+    timer = null; var L = ls(); if (!L) return;
+    try { L.setItem(KEY, JSON.stringify(buf)); } catch (e) { /* storage full or blocked: the in-memory log still works */ }
+  }
+  function schedule() { if (!ls() || typeof setTimeout !== 'function') return; if (timer == null) timer = setTimeout(save, 400); }
+  D.flush = function () { if (timer != null && typeof clearTimeout === 'function') clearTimeout(timer); save(); };
+
+  // ---------------------------------------------------------------- log buffer
+  function push(e) {
+    e.n = ++buf.seq;
+    e.s = buf.run ? Math.round((Date.now() - buf.run.at) / 1000) : 0;
+    prune(e);
+    buf.entries.push(e); size += JSON.stringify(e).length;
+    while (size > CAP && buf.entries.length > 12) { size -= JSON.stringify(buf.entries.shift()).length; buf.dropped++; }
+    schedule();
+    return e;
+  }
+  function noteFlags(e, msgs) {
+    msgs.forEach(function (m) { buf.flagCount++; buf.flags.push({ n: e.n, fl: e.fl, tn: e.tn, msg: m }); });
+    while (buf.flags.length > MAXFLAGS) buf.flags.shift();
+  }
+  function pushChecked(e, msgs) {
+    if (msgs && msgs.length) e.flag = msgs.join(' | ');
+    push(e);
+    if (msgs && msgs.length) noteFlags(e, msgs);
+    return e;
+  }
+
+  // ---------------------------------------------------------------- run lifecycle
+  function header(st, how) {
+    return {
+      at: Date.now(), how: how, seed: st.seed, char: st.char, asc: st.asc || 0, mods: st.mods || [], daily: !!st.daily,
+      hp: st.hp, maxHp: st.maxHp, gold: st.gold, act: st.act, floor: st.floor,
+      deck: (st.deck || []).map(cid), relics: (st.relics || []).slice()
+    };
+  }
+  function attach(st, how) {
+    if (!loaded) load();
+    var same = how === 'resume' && buf.run && buf.run.seed === st.seed && buf.run.char === st.char && (buf.run.asc || 0) === (st.asc || 0);
+    if (!same) { buf = fresh(); size = 0; buf.run = header(st, how === 'resume' ? 'resumed-unknown-start' : how); }
+    lastSt = st; lastCombat = st.combat || null;
+    if (how === 'resume') push({ t: 'resume', fl: st.floor, act: st.act, scr: st.screen, hp: st.hp + '/' + st.maxHp, gold: st.gold });
+  }
+  D.newRun = function (st) { if (!installed) return; try { attach(st, 'new'); } catch (e) { } };
+  D.resume = function (st) { if (!installed) return; try { attach(st, 'resume'); } catch (e) { } };
+  D.clear = function () { buf = fresh(); size = 0; lastSt = null; lastCombat = null; var L = ls(); if (L) { try { L.removeItem(KEY); } catch (e) { } } };
+
+  // ---------------------------------------------------------------- snapshots
+  function meSnap(st) { var c = st.combat; return { hp: st.hp + '/' + st.maxHp, ward: c.player.ward, ink: c.ink, st: nz(c.player.st) }; }
+  function foeSnap(e) { return { uid: e.uid, id: e.id, hp: e.hp, ward: e.ward, st: nz(e.st), int: e.dead ? undefined : e.intent, dead: e.dead || undefined }; }
+  function shown(st, e) { try { var i = M.intentInfo(st, e); return i.dmg ? (i.dmg + 'x' + (i.times || 1)) : undefined; } catch (x) { return undefined; } }
+
+  function leaves(ops, top, out) {
+    (ops || []).forEach(function (o) {
+      if (o.op === 'if') { leaves(o.then, false, out); leaves(o.else, false, out); }
+      else if (o.op === 'repeat') leaves(o.ops, false, out);
+      else out.push({ o: o, top: top });
+    });
+    return out;
+  }
+
+  // ---------------------------------------------------------------- before / after each action
+  function before(st, a) {
+    var p = { screen: st.screen, hp: st.hp, gold: st.gold, floor: st.floor, act: st.act, deckN: (st.deck || []).length };
+    var c = st.combat;
+    if (a.type === 'play' && c && st.screen === 'combat' && !c.over) {
+      var inst = c.hand[a.hand];
+      if (inst) {
+        var def = M.cardDef(inst), live = c.enemies.filter(function (e) { return !e.dead; }), ti = a.target;
+        if (def.target === 'enemy' && (ti == null || !c.enemies[ti] || c.enemies[ti].dead) && live.length === 1) ti = c.enemies.indexOf(live[0]);
+        var torn = live.map(function (e) { return (e.st.torn || 0) > 0; });
+        p.card = {
+          id: cid(inst), cost: M.cardCost(st, inst), text: strip(M.cardText(inst, st)), def: def,
+          ti: ti, tgt: c.enemies[ti] ? foeSnap(c.enemies[ti]) : undefined,
+          mixedTorn: torn.some(function (x) { return x; }) && !torn.every(function (x) { return x; })
+        };
+        p.me = meSnap(st);
+      }
+    } else if (a.type === 'endTurn' && c && st.screen === 'combat' && !c.over) {
+      p.turn = c.turn; p.me = meSnap(st);
+      p.intents = {};
+      c.enemies.forEach(function (e) {
+        if (e.dead) return;
+        var info = {}; try { info = M.intentInfo(st, e); } catch (x) { }
+        p.intents[e.uid] = { id: e.id, name: info.name || e.intent, dmg: info.dmg || 0, times: info.times || 0 };
+      });
+    } else if (a.type === 'takeCard' && st.reward) p.detail = st.reward.cards && st.reward.cards[a.idx];
+    else if (a.type === 'buyCard' && st.shop) p.detail = st.shop.cards && st.shop.cards[a.idx] && st.shop.cards[a.idx].id;
+    else if (a.type === 'buyRelic' && st.shop) p.detail = st.shop.relics && st.shop.relics[a.idx] && st.shop.relics[a.idx].id;
+    else if (a.type === 'eventChoice' && st.event) p.detail = (st.event.id || st.event.title || '') + '#' + a.idx;
+    else if (a.type === 'chooseNode') { try { var n = M.findNode(st, a.id); p.detail = n && n.type; } catch (x) { } }
+    return p;
+  }
+
+  function invariants(st) {
+    var m = [], c = st.combat;
+    if (!isFinite(st.hp) || st.hp > st.maxHp || st.hp < 0) m.push('INV player hp ' + st.hp + '/' + st.maxHp);
+    if (!isFinite(st.gold) || st.gold < 0) m.push('INV gold ' + st.gold);
+    if (c && st.screen === 'combat') {
+      if (!isFinite(c.player.ward) || c.player.ward < 0) m.push('INV player ward ' + c.player.ward);
+      if (!isFinite(c.ink) || c.ink < 0) m.push('INV ink ' + c.ink);
+      if (c.hand.length > 10) m.push('INV hand size ' + c.hand.length);
+      Object.keys(c.player.st).forEach(function (k) { var v = c.player.st[k]; if (!isFinite(v) || v === 0) m.push('INV player status ' + k + '=' + v); });
+      c.enemies.forEach(function (e) {
+        if (e.hp < 0 || e.hp > e.maxHp || !isFinite(e.hp)) m.push('INV ' + e.id + ' hp ' + e.hp + '/' + e.maxHp);
+        if (e.ward < 0 || !isFinite(e.ward)) m.push('INV ' + e.id + ' ward ' + e.ward);
+        Object.keys(e.st).forEach(function (k) { var v = e.st[k]; if (!isFinite(v) || v === 0) m.push('INV ' + e.id + ' status ' + k + '=' + v); });
+      });
+    }
+    return m;
+  }
+
+  function afterPlay(st, a, pre, fx, res) {
+    var c = st.combat, cd = pre.card, msgs = [];
+    var hits = [], wards = [], sts = [], kills = [], ilm = false;
+    fx.forEach(function (f) {
+      if (f.k === 'hit' && f.src === 'p') hits.push([f.tgt, f.n, f.blocked]);
+      else if (f.k === 'ward' && f.tgt === 'p') wards.push(f.n);
+      else if (f.k === 'status') sts.push([f.tgt, f.s, f.n]);
+      else if (f.k === 'death') kills.push(f.tgt);
+      else if (f.k === 'illuminate') ilm = true;
+    });
+    // ---- printed number vs actual (only for the card's first top-level dmg / ward op, matching what the text leads with)
+    var lv = leaves(cd.def.ops, true, []);
+    var fd = lv.filter(function (l) { return l.o.op === 'dmg' || l.o.op === 'dmgPer'; })[0];
+    if (fd && fd.top && fd.o.op === 'dmg' && fd.o.target !== 'random') {
+      var m = /Deal (\d+) damage/.exec(cd.text), h0 = fx.filter(function (f) { return f.k === 'hit' && f.src === 'p'; })[0];
+      if (m && h0 && !cd.mixedTorn && h0.n + h0.blocked !== +m[1]) msgs.push('DMG ' + cd.id + ' printed ' + m[1] + ' but first hit was ' + (h0.n + h0.blocked));
+    }
+    var fw = lv.filter(function (l) { return l.o.op === 'ward' || l.o.op === 'wardPer'; })[0];
+    if (fw && fw.top && fw.o.op === 'ward' && fw.o.target !== 'allies') {
+      var wm = /Gain (\d+) Ward/.exec(cd.text);
+      if (wm && wards.length && wards[0] !== +wm[1]) msgs.push('WARD ' + cd.id + ' printed ' + wm[1] + ' but gained ' + wards[0]);
+    }
+    invariants(st).forEach(function (x) { msgs.push(x); });
+    var e = {
+      t: 'play', fl: st.floor, tn: c.turn, card: cd.id, cost: cd.cost, text: cd.text, me: pre.me, tgt: cd.tgt,
+      hits: hits, wards: wards, sts: sts, kills: kills, ilm: ilm || undefined,
+      after: { hp: st.hp + '/' + st.maxHp, ward: c.player.ward, ink: c.ink },
+      foes: c.enemies.filter(function (x) { return !x.dead; }).map(foeSnap), ov: c.over || undefined
+    };
+    pushChecked(e, msgs);
+  }
+
+  function afterEnd(st, a, pre, fx) {
+    var c = st.combat, acts = [], cur = null, earlier = false, msgs = [];
+    fx.forEach(function (f) {
+      if (f.k === 'enemyAct') { cur = { uid: f.tgt, mv: f.name || f.move, hits: [], earlier: earlier }; acts.push(cur); }
+      else if (f.k === 'hit' && cur && f.tgt === 'p') cur.hits.push(f.n + f.blocked);
+      else if (f.k === 'status' && cur && f.n > 0) earlier = true; // an earlier foe buffed itself/allies or debuffed you
+    });
+    var playerDown = st.hp <= 0;
+    var out = acts.map(function (x) {
+      var it = pre.intents && pre.intents[x.uid], o = { foe: it ? it.id : x.uid, mv: x.mv };
+      if (it && it.dmg) o.shows = it.dmg + 'x' + it.times;
+      if (x.hits.length) o.hits = x.hits;
+      if (it && !playerDown) {
+        var want = it.dmg * it.times, got = x.hits.reduce(function (s, v) { return s + v; }, 0);
+        if (want !== got) {
+          var mm = it.id + ' "' + (it.name || x.mv) + '" showed ' + it.dmg + 'x' + it.times + '=' + want + ' but dealt ' + (x.hits.join('+') || '0') + '=' + got;
+          // A foe acting earlier in the same round can legitimately change this foe's damage (it buffed allies / put Torn on you).
+          // That is expected game behaviour, so it is noted in the entry but not counted as a flag.
+          if (x.earlier) o.note = 'INTENT differs after an earlier foe changed statuses: ' + mm;
+          else { mm = 'INTENT ' + mm; msgs.push(mm); o.flag = mm; }
+        }
+      }
+      return o;
+    });
+    invariants(st).forEach(function (x) { msgs.push(x); });
+    var e = {
+      t: 'end', fl: st.floor, tn: pre.turn, me: pre.me, acts: out,
+      after: c ? { me: c.over ? undefined : meSnap(st), foes: c.enemies.filter(function (x) { return !x.dead; }).map(function (x) { var f = foeSnap(x); f.shows = shown(st, x); return f; }) } : undefined,
+      hand: c && !c.over ? c.hand.map(cid) : undefined, ov: c && c.over || undefined
+    };
+    pushChecked(e, msgs);
+  }
+
+  function afterOther(st, a, pre) {
+    var e = { t: 'act', a: a.type, scr: pre.screen + (st.screen !== pre.screen ? '>' + st.screen : ''), fl: st.floor, act: st.act };
+    e.d = [a.id, a.idx != null ? '#' + a.idx : null, a.uid != null ? 'uid' + a.uid : null, pre.detail].filter(function (x) { return x != null && x !== ''; }).join(' ');
+    if (pre.deckN !== (st.deck || []).length) e.deck = (st.deck || []).length;
+    if (st.hp !== pre.hp) e.hp = st.hp + '/' + st.maxHp; if (st.gold !== pre.gold) e.gold = st.gold;
+    pushChecked(e, invariants(st));
+  }
+
+  function after(st, a, pre, res) {
+    if (!res || !res.ok) return;
+    var fx = (st.fx || []).slice();
+    var c = st.combat;
+    var newFight = c && c !== lastCombat;
+    if (a.type === 'play' && pre.card) afterPlay(st, a, pre, fx, res);
+    else if (a.type === 'endTurn' && pre.intents) afterEnd(st, a, pre, fx);
+    else afterOther(st, a, pre);
+    if (newFight) {
+      lastCombat = c;
+      push({
+        t: 'fight', fl: st.floor, act: st.act, kind: c.kind,
+        foes: c.enemies.map(function (e) { var f = foeSnap(e); f.shows = shown(st, e); return f; }),
+        me: { hp: st.hp + '/' + st.maxHp, ward: c.player.ward, ink: c.ink, st: nz(c.player.st) }, hand: c.hand.map(cid)
+      });
+    } else if (!c) lastCombat = null;
+    if (st.over) push({ t: 'over', won: !!st.won, act: st.act, fl: st.floor, hp: st.hp + '/' + st.maxHp });
+  }
+
+  // ---------------------------------------------------------------- errors
+  D.error = function (kind, e, extra) {
+    try {
+      var msg = String((e && e.message) || e || '').slice(0, 240), last = buf.entries[buf.entries.length - 1];
+      if (last && last.t === 'err' && last.msg === msg) { last.x = (last.x || 1) + 1; schedule(); return; }
+      var ent = { t: 'err', kind: kind, msg: msg, stack: String((e && e.stack) || '').split('\n').slice(0, 6).join(' | ').slice(0, 500) };
+      if (extra) for (var k in extra) ent[k] = extra[k];
+      push(ent); buf.errs.push({ n: ent.n, kind: kind, msg: msg });
+      while (buf.errs.length > MAXERRS) buf.errs.shift();
+    } catch (x) { }
+  };
+
+  // ---------------------------------------------------------------- install
+  D.install = function () {
+    if (installed) return; installed = true;
+    if (!loaded) load();
+    origAct = M.act;
+    M.act = function (st, a) {
+      if (!a) return origAct(st, a);
+      var pre = null;
+      try { if (st !== lastSt) attach(st, 'resume'); pre = before(st, a); } catch (x) { D.error('diag-before', x); }
+      var res;
+      try { res = origAct(st, a); }
+      catch (ex) { D.error('engine', ex, { a: a.type, scr: st.screen, fl: st.floor }); throw ex; }
+      try { if (pre) after(st, a, pre, res); } catch (x) { D.error('diag-after', x); }
+      return res;
+    };
+    if (typeof console !== 'undefined' && console.error) {
+      origConsoleErr = console.error;
+      console.error = function () {
+        try { D.error('console', Array.prototype.slice.call(arguments).map(function (v) { return (v && v.message) || String(v); }).join(' ')); } catch (x) { }
+        return origConsoleErr.apply(console, arguments);
+      };
+    }
+    if (typeof G.addEventListener === 'function') {
+      G.addEventListener('error', function (ev) { D.error('window', ev && (ev.error || ev.message), { at: ev && ev.filename ? (String(ev.filename).split('/').pop() + ':' + ev.lineno) : undefined }); });
+      G.addEventListener('unhandledrejection', function (ev) { D.error('promise', ev && ev.reason); });
+      G.addEventListener('pagehide', D.flush);
+      if (G.document && G.document.addEventListener) G.document.addEventListener('visibilitychange', function () { if (G.document.visibilityState === 'hidden') D.flush(); });
+    }
+  };
+  D.uninstall = function () { // tests only
+    if (!installed) return; installed = false;
+    if (origAct) M.act = origAct; if (origConsoleErr) console.error = origConsoleErr; lastSt = null;
+  };
+
+  // ---------------------------------------------------------------- report
+  function deckStr(deck) {
+    var cnt = {}, order = []; (deck || []).forEach(function (d) { var k = cid(d); if (!cnt[k]) { cnt[k] = 0; order.push(k); } cnt[k]++; });
+    return order.map(function (k) { return cnt[k] > 1 ? k + ' x' + cnt[k] : k; }).join(', ');
+  }
+  D.report = function (st) {
+    if (!loaded) load();
+    if (timer != null) D.flush();
+    var L = [], r = buf.run, W = G, nav = W.navigator || {};
+    L.push('MARGINALIA DIAGNOSTIC REPORT (diag v' + VERSION + ')');
+    L.push('generated: ' + new Date().toISOString());
+    if (W.document) L.push('page last modified: ' + (W.document.lastModified || '?') + ' | standalone: ' + (!!nav.standalone || (W.document.documentElement && W.document.documentElement.classList.contains('standalone')) || false));
+    L.push('device: ' + (nav.userAgent || 'n/a') + ' | viewport ' + (W.innerWidth || '?') + 'x' + (W.innerHeight || '?') + ' @' + (W.devicePixelRatio || '?'));
+    if (r) L.push('run: seed ' + r.seed + ' | ' + r.char + ' | rubrication ' + r.asc + (r.daily ? ' | daily' : '') + (r.mods && r.mods.length ? ' | mods ' + r.mods.join('+') : '') + ' | began ' + new Date(r.at).toISOString() + ' (' + r.how + ')');
+    else L.push('run: none recorded yet');
+    if (st) {
+      L.push('now: act ' + st.act + ', folio ' + st.floor + ', screen ' + st.screen + ', hp ' + st.hp + '/' + st.maxHp + ', silver ' + st.gold + (st.combat ? ', turn ' + st.combat.turn : ''));
+      L.push('deck (' + (st.deck || []).length + '): ' + deckStr(st.deck));
+      L.push('relics: ' + (st.relics || []).join(', '));
+    }
+    L.push('log: ' + buf.entries.length + ' entries kept' + (buf.dropped ? ' (' + buf.dropped + ' older dropped)' : '') + ' | flags: ' + buf.flagCount + ' | errors: ' + buf.errs.length);
+    if (buf.flags.length) {
+      L.push('', 'FLAGS (printed number vs what happened; #entry, folio, turn):');
+      buf.flags.forEach(function (f) { L.push('  #' + f.n + ' f' + f.fl + (f.tn ? ' t' + f.tn : '') + ' ' + f.msg); });
+    }
+    if (buf.errs.length) {
+      L.push('', 'ERRORS:');
+      buf.errs.forEach(function (x) { L.push('  #' + x.n + ' [' + x.kind + '] ' + x.msg); });
+    }
+    L.push('', 'LOG (oldest first; JSON lines; hp as now/max; s = seconds since run start):');
+    buf.entries.forEach(function (e) { L.push(JSON.stringify(e)); });
+    return L.join('\n');
+  };
+  D.state = function () { return buf; }; // tests / console inspection
+})();
+
+;
 /* ==== ui.js ==== */
 /* Marginalia — UI layer (DOM, input, animation, sound, persistence).
    Talks to the engine only through M.act + read-only helpers (see DESIGN.md "UI contract").
@@ -5484,10 +5847,11 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
     var asc = daily ? 0 : Math.max(0, Math.min(rubMax(ch), opts.asc | 0));
     st = M.newRun({ seed: seed, char: ch, asc: asc, unlocked: book.ach.slice() });
     upgradeSave(st);
+    if (M.diag) M.diag.newRun(st);
     ui.view = 'run'; ui.recorded = null; ui.mounted = null; ui.selUid = null;
     afterAction(); persist(); Sfx.page(); render();
   }
-  function continueRun(saved) { st = upgradeSave(saved); ui.view = 'run'; ui.mounted = null; ui.selUid = null; closeOv(); Sfx.page(); render(); }
+  function continueRun(saved) { st = upgradeSave(saved); if (M.diag) M.diag.resume(st); ui.view = 'run'; ui.mounted = null; ui.selUid = null; closeOv(); Sfx.page(); render(); }
   function toTitle() { Sfx.stopAll(); ui.view = 'title'; ui.mounted = null; closeOv(); render(); }
 
   /* =========================================================== 5. fx player */
@@ -6091,18 +6455,23 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
     var mods = (st.mods || []).length ? ' [' + st.mods.map(function (id) { return modDef(id).name; }).join(' + ') + ']' : '';
     return head + mods + ' — ' + who + (st.asc ? ', Rubrication ' + roman(st.asc) : '') + ' — ' + res + ' Score ' + sc;
   }
-  function copyText(t) {
+  function copyText(t, viewer) {
+    var show = viewer || showText;
     var fallback = function () {
       try {
         var ta = document.createElement('textarea'); ta.value = t; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.top = '-1000px';
         document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length); var ok = document.execCommand('copy'); ta.remove();
-        toast(ok ? 'Copied to clipboard' : 'Could not copy'); if (!ok) showText(t);
-      } catch (e) { showText(t); }
+        toast(ok ? 'Copied to clipboard' : 'Could not copy'); if (!ok) show(t);
+      } catch (e) { show(t); }
     };
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(function () { toast('Copied to clipboard'); }, fallback);
       else fallback();
     } catch (e) { fallback(); }
+  }
+  function showReport(t) {
+    dialog('Diagnostic report', '<p class="faded" style="margin:0 0 6px;font-size:14px">Select all, copy, and paste it to Claude. It holds only this device’s last fight or two, the seed, and any errors.</p><textarea id="diagTa" readonly spellcheck="false" style="width:100%;height:46vh;box-sizing:border-box;font:11px/1.3 ui-monospace,Menlo,monospace;-webkit-user-select:text;user-select:text">' + esc(t) + '</textarea>', [{ label: 'Close', cls: 'primary' }]);
+    var ta = document.getElementById('diagTa'); if (ta) { try { ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length); } catch (e) { } }
   }
   function showText(t) { dialog('Share', '<p style="-webkit-user-select:text;user-select:text">' + esc(t) + '</p>', [{ label: 'Close', cls: 'primary' }]); }
 
@@ -6483,7 +6852,8 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
       (st ? '<div class="toggleRow"><span>Seed</span><span class="sc" style="-webkit-user-select:text;user-select:text">' + esc(st.seed) + '</span></div>' +
         '<div class="toggleRow"><span>Deck · Relics</span><span><button class="btn small" data-a="deck">Deck</button> <button class="btn small" data-a="relics">Relics</button></span></div>' : '') +
       '<div class="toggleRow"><span>Rules</span><span><button class="btn small" data-a="howto">How to Play</button> <button class="btn small" data-a="glossary">Glossary</button></span></div>' +
-      '<div class="toggleRow"><span>Collection</span><button class="btn small" data-a="book">The Book · ' + bookPct() + '%</button></div></div>';
+      '<div class="toggleRow"><span>Collection</span><button class="btn small" data-a="book">The Book · ' + bookPct() + '%</button></div>' +
+      (M.diag ? '<div class="toggleRow"><span>Diagnostics</span><span><button class="btn small" data-a="diagCopy">Copy report</button> <button class="btn small" data-a="diagView">View</button></span></div>' : '') + '</div>';
     var btns = [];
     if (st && ui.view === 'run' && !st.over) btns.push({ label: 'Abandon', cls: 'ghost', fn: function () { confirmDlg('Abandon this run?', 'The page will be scraped clean and the run counted as lost.', 'Abandon', function () { st.over = true; st.won = false; recordEnd(); lsDel(SAVE_KEY); toTitle(); }); } });
     btns.push({ label: 'Title', fn: toTitle });
@@ -6797,6 +7167,7 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
       prefs.sound = !prefs.sound; savePrefs(); if (!prefs.sound) Sfx.stopAll(); else { Sfx.unlock(); Sfx.bell(); if (st && st.combat && st.combat.kind === 'boss' && st.screen === 'combat') Sfx.drone(true); }
       if (ovl.classList.contains('on')) showMenu(); else render();
     },
+    diagCopy: function () { var t = M.diag.report(st); copyText(t, showReport); }, diagView: function () { closeOv(); showReport(M.diag.report(st)); },
     menu: showMenu, deck: function () { closeOv(); showDeck(); }, relics: function () { closeOv(); showRelics(); },
     closeOv: function () { closeOv(); },
     zoomAct: function (el) { var a = zoomActions[+el.getAttribute('data-idx')]; closeOv(); if (a && a.fn) a.fn(); },
@@ -6965,6 +7336,7 @@ html.standalone body, html.standalone #app, html.standalone #fxl, html.standalon
 
   /* =========================================================== 10. boot */
   function boot() {
+    if (M.diag) M.diag.install();
     var params = {}; try { params = Object.fromEntries(new URLSearchParams(G.location.search)); } catch (e) { }
     var saved = loadSave();
     if (params.seed) {

@@ -859,3 +859,6 @@ h1, h2, h3 { margin: 0; font-weight: 400; }
   :root { --sat: max(env(safe-area-inset-top, 0px) + 10px, 30px); --sab: max(env(safe-area-inset-bottom, 0px), 8px); }
 }
 html.standalone { --sat: max(env(safe-area-inset-top, 0px) + 10px, 30px); --sab: max(env(safe-area-inset-bottom, 0px), 8px); }
+
+html.standalone, html.standalone body { height: var(--app-h, 100%); }
+html.standalone body, html.standalone #app, html.standalone #fxl, html.standalone #ovl, html.standalone #rotate { bottom: auto; height: var(--app-h, 100%); }

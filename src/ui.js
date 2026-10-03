@@ -351,10 +351,11 @@
     var asc = daily ? 0 : Math.max(0, Math.min(rubMax(ch), opts.asc | 0));
     st = M.newRun({ seed: seed, char: ch, asc: asc, unlocked: book.ach.slice() });
     upgradeSave(st);
+    if (M.diag) M.diag.newRun(st);
     ui.view = 'run'; ui.recorded = null; ui.mounted = null; ui.selUid = null;
     afterAction(); persist(); Sfx.page(); render();
   }
-  function continueRun(saved) { st = upgradeSave(saved); ui.view = 'run'; ui.mounted = null; ui.selUid = null; closeOv(); Sfx.page(); render(); }
+  function continueRun(saved) { st = upgradeSave(saved); if (M.diag) M.diag.resume(st); ui.view = 'run'; ui.mounted = null; ui.selUid = null; closeOv(); Sfx.page(); render(); }
   function toTitle() { Sfx.stopAll(); ui.view = 'title'; ui.mounted = null; closeOv(); render(); }
 
   /* =========================================================== 5. fx player */
@@ -958,18 +959,23 @@
     var mods = (st.mods || []).length ? ' [' + st.mods.map(function (id) { return modDef(id).name; }).join(' + ') + ']' : '';
     return head + mods + ' — ' + who + (st.asc ? ', Rubrication ' + roman(st.asc) : '') + ' — ' + res + ' Score ' + sc;
   }
-  function copyText(t) {
+  function copyText(t, viewer) {
+    var show = viewer || showText;
     var fallback = function () {
       try {
         var ta = document.createElement('textarea'); ta.value = t; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.top = '-1000px';
         document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length); var ok = document.execCommand('copy'); ta.remove();
-        toast(ok ? 'Copied to clipboard' : 'Could not copy'); if (!ok) showText(t);
-      } catch (e) { showText(t); }
+        toast(ok ? 'Copied to clipboard' : 'Could not copy'); if (!ok) show(t);
+      } catch (e) { show(t); }
     };
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(function () { toast('Copied to clipboard'); }, fallback);
       else fallback();
     } catch (e) { fallback(); }
+  }
+  function showReport(t) {
+    dialog('Diagnostic report', '<p class="faded" style="margin:0 0 6px;font-size:14px">Select all, copy, and paste it to Claude. It holds only this device’s last fight or two, the seed, and any errors.</p><textarea id="diagTa" readonly spellcheck="false" style="width:100%;height:46vh;box-sizing:border-box;font:11px/1.3 ui-monospace,Menlo,monospace;-webkit-user-select:text;user-select:text">' + esc(t) + '</textarea>', [{ label: 'Close', cls: 'primary' }]);
+    var ta = document.getElementById('diagTa'); if (ta) { try { ta.focus(); ta.select(); ta.setSelectionRange(0, ta.value.length); } catch (e) { } }
   }
   function showText(t) { dialog('Share', '<p style="-webkit-user-select:text;user-select:text">' + esc(t) + '</p>', [{ label: 'Close', cls: 'primary' }]); }
 
@@ -1350,7 +1356,8 @@
       (st ? '<div class="toggleRow"><span>Seed</span><span class="sc" style="-webkit-user-select:text;user-select:text">' + esc(st.seed) + '</span></div>' +
         '<div class="toggleRow"><span>Deck · Relics</span><span><button class="btn small" data-a="deck">Deck</button> <button class="btn small" data-a="relics">Relics</button></span></div>' : '') +
       '<div class="toggleRow"><span>Rules</span><span><button class="btn small" data-a="howto">How to Play</button> <button class="btn small" data-a="glossary">Glossary</button></span></div>' +
-      '<div class="toggleRow"><span>Collection</span><button class="btn small" data-a="book">The Book · ' + bookPct() + '%</button></div></div>';
+      '<div class="toggleRow"><span>Collection</span><button class="btn small" data-a="book">The Book · ' + bookPct() + '%</button></div>' +
+      (M.diag ? '<div class="toggleRow"><span>Diagnostics</span><span><button class="btn small" data-a="diagCopy">Copy report</button> <button class="btn small" data-a="diagView">View</button></span></div>' : '') + '</div>';
     var btns = [];
     if (st && ui.view === 'run' && !st.over) btns.push({ label: 'Abandon', cls: 'ghost', fn: function () { confirmDlg('Abandon this run?', 'The page will be scraped clean and the run counted as lost.', 'Abandon', function () { st.over = true; st.won = false; recordEnd(); lsDel(SAVE_KEY); toTitle(); }); } });
     btns.push({ label: 'Title', fn: toTitle });
@@ -1664,6 +1671,7 @@
       prefs.sound = !prefs.sound; savePrefs(); if (!prefs.sound) Sfx.stopAll(); else { Sfx.unlock(); Sfx.bell(); if (st && st.combat && st.combat.kind === 'boss' && st.screen === 'combat') Sfx.drone(true); }
       if (ovl.classList.contains('on')) showMenu(); else render();
     },
+    diagCopy: function () { var t = M.diag.report(st); copyText(t, showReport); }, diagView: function () { closeOv(); showReport(M.diag.report(st)); },
     menu: showMenu, deck: function () { closeOv(); showDeck(); }, relics: function () { closeOv(); showRelics(); },
     closeOv: function () { closeOv(); },
     zoomAct: function (el) { var a = zoomActions[+el.getAttribute('data-idx')]; closeOv(); if (a && a.fn) a.fn(); },
@@ -1832,6 +1840,7 @@
 
   /* =========================================================== 10. boot */
   function boot() {
+    if (M.diag) M.diag.install();
     var params = {}; try { params = Object.fromEntries(new URLSearchParams(G.location.search)); } catch (e) { }
     var saved = loadSave();
     if (params.seed) {

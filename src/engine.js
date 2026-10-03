@@ -21,7 +21,7 @@
   };
   M.STATUS = {
     might:    { name: 'Might',    good: true,  desc: 'Attacks deal +N damage per hit.' },
-    resolve:  { name: 'Resolve',  good: true,  desc: 'Gain +N Ward whenever you gain Ward from a card.' },
+    resolve:  { name: 'Resolve',  good: true,  desc: 'Gain +N extra Ward whenever you gain Ward from a card, Gloss or relic.' },
     corrode:  { name: 'Corrode',  good: false, desc: 'At the start of its turn, loses N HP (ignores Ward), then Corrode drops by 1.' },
     smudged:  { name: 'Smudged',  good: false, desc: 'Deals 25% less attack damage. Wears off by 1 each turn.' },
     torn:     { name: 'Torn',     good: false, desc: 'Takes 50% more attack damage. Wears off by 1 each turn.' },
@@ -361,9 +361,16 @@
     if (!mv) return { kinds: ['unknown'] };
     var info = { kinds: [], name: mv.name || '', dmg: 0, times: 0 };
     var ei = st.combat.enemies.indexOf(e);
+    var ov = { srcMight: 0, srcSmudged: false, tgtTorn: false }; // effects the move applies before its strike lands
     var scan = function (ops) {
       ops.forEach(function (o) {
-        if (o.op === 'dmg') { info.dmg = calcDmg(st, ei, 'p', o.n, true); info.times += (o.times || 1); add('attack'); }
+        if (o.op === 'apply' && o.n > 0) {
+          var selfish = (o.target === 'self' || o.target === 'allies');
+          if (selfish && o.s === 'might') ov.srcMight += o.n;
+          if (selfish && o.s === 'smudged') ov.srcSmudged = true;
+          if (!selfish && o.s === 'torn') ov.tgtTorn = true;
+        }
+        if (o.op === 'dmg') { info.dmg = calcDmg(st, ei, 'p', o.n, true, ov); info.times += (o.times || 1); add('attack'); }
         else if (o.op === 'ward') add('defend');
         else if (o.op === 'apply') add((o.target === 'self' || o.target === 'allies') ? 'buff' : 'debuff');
         else if (o.op === 'heal') add('buff');
@@ -381,16 +388,26 @@
     return info;
   };
 
-  function calcDmg(st, src, tgt, base, isAttack) {
+  // ov (optional, previews only): {srcMight, srcSmudged, tgtTorn} = effects that an earlier op of the SAME card/move
+  // will have applied by the time this hit lands (e.g. Couched Lance applies Torn before it strikes).
+  function calcDmg(st, src, tgt, base, isAttack, ov) {
     var n = base;
     if (isAttack && src != null) {
-      n += stv(st, src, 'might');
-      if (stv(st, src, 'smudged') > 0) n = Math.floor(n * 0.75);
-      if (tgt != null && stv(st, tgt, 'torn') > 0) n = Math.floor(n * 1.5);
+      n += stv(st, src, 'might') + ((ov && ov.srcMight) || 0);
+      if (stv(st, src, 'smudged') > 0 || (ov && ov.srcSmudged)) n = Math.floor(n * 0.75);
+      if ((tgt != null && stv(st, tgt, 'torn') > 0) || (ov && ov.tgtTorn)) n = Math.floor(n * 1.5);
     }
     return Math.max(0, n);
   }
   M.calcDmg = calcDmg;
+  // Ward actually gained for a nominal amount (Resolve first, then Faded x0.75). Pure: used by gainWard and card text.
+  function calcWard(st, ref, n, fromCard) {
+    var a = actor(st, ref); if (!a) return n;
+    if (fromCard) n += (a.st.resolve || 0);
+    if ((a.st.faded || 0) > 0) n = Math.floor(n * 0.75);
+    return Math.max(0, n);
+  }
+  M.calcWard = calcWard;
 
   function dealDamage(st, src, tgt, base, isAttack) {
     var c = st.combat; if (!c || c.over) return 0;
@@ -430,9 +447,7 @@
 
   function gainWard(st, ref, n, fromCard) {
     var a = actor(st, ref); if (!a) return;
-    if (fromCard) n += (a.st.resolve || 0);
-    if ((a.st.faded || 0) > 0) n = Math.floor(n * 0.75);
-    n = Math.max(0, n);
+    n = calcWard(st, ref, n, fromCard);
     a.ward += n;
     if (ref === 'p' && a.ward > st.stats.maxWard) st.stats.maxWard = a.ward;
     fx(st, { k: 'ward', tgt: ref === 'p' ? 'p' : st.combat.enemies[ref].uid, n: n });
@@ -746,6 +761,7 @@
           ts = resolveTargets(st, ctx, o, 'enemy');
           ts.forEach(function (t) {
             var base = o.op === 'dmg' ? o.n : (o.base || 0) + (o.mult || 1) * perValue(st, ctx, o.per, t);
+            if (o.op === 'dmgPer' && base <= 0) return; // "N per X" with nothing to count deals no damage (Might must not leak in)
             dealDamage(st, s, t, base, true);
           });
           checkEnd(st);
@@ -1147,21 +1163,42 @@
   function cardName(id) { return M.CARDS[id] ? M.CARDS[id].name : id; }
   function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
 
-  function describeOps(ops, ctx) {
+  // Build the rule sentences for an op list. `ov` tracks effects an EARLIER op in the same list will already have
+  // applied when a later op resolves (e.g. Couched Lance applies Torn, then strikes) so printed numbers are true.
+  function describeList(ops, ctx, ov) {
     var out = [];
+    ov = ov || { srcMight: 0, srcResolve: 0, tornAll: false, tornChosen: false };
+    var inC = !!(ctx && ctx.st && ctx.st.combat);
+    // In combat, if every living foe is already Torn, the printed damage can include that bonus whoever is struck.
+    var allTorn = false;
+    if (inC) { var lv = ctx.st.combat.enemies.filter(function (e) { return !e.dead; }); allTorn = lv.length > 0 && lv.every(function (e) { return (e.st.torn || 0) > 0; }); }
     (ops || []).forEach(function (o) {
       var t = '';
       var tgtTxt = o.target === 'all' ? ' to ALL foes' : o.target === 'random' ? ' to a random foe' : '';
       switch (o.op) {
         case 'dmg':
+          var chosen = !o.target || o.target === 'enemy';
+          var tornNow = allTorn || ov.tornAll || (chosen && ov.tornChosen);
           var n = o.n;
-          if (ctx && ctx.st && ctx.st.combat) n = calcDmg(ctx.st, 'p', null, o.n, true);
-          var cls = (ctx && n > o.n) ? ' class="up"' : (ctx && n < o.n) ? ' class="down"' : '';
+          if (inC) n = calcDmg(ctx.st, 'p', null, o.n, true, { srcMight: ov.srcMight, tgtTorn: tornNow });
+          else { n = o.n + ov.srcMight; if (tornNow) n = Math.floor(n * 1.5); }
+          var cls = n > o.n ? ' class="up"' : n < o.n ? ' class="down"' : '';
           t = 'Deal <b' + cls + '>' + n + '</b> damage' + tgtTxt + ((o.times || 1) > 1 ? ' <b>' + o.times + '</b> times' : ''); break;
         case 'dmgPer': t = 'Deal ' + (o.base ? '<b>' + o.base + '</b> damage plus ' : '') + '<b>' + (o.mult || 1) + '</b>' + (o.base ? '' : ' damage') + ' per ' + PER_TXT[o.per] + tgtTxt; break;
-        case 'ward': t = (o.target === 'allies' ? 'All foes gain ' : 'Gain ') + '<b>' + o.n + '</b> Ward'; break;
+        case 'ward':
+          if (o.target === 'allies') { t = 'All foes gain <b>' + o.n + '</b> Ward'; break; }
+          var wn = inC ? calcWard(ctx.st, 'p', o.n + ov.srcResolve, true) : o.n + ov.srcResolve; // Resolve gained earlier on this card counts
+          var wcls = wn > o.n ? ' class="up"' : wn < o.n ? ' class="down"' : '';
+          t = 'Gain <b' + wcls + '>' + wn + '</b> Ward'; break;
         case 'wardPer': t = 'Gain ' + (o.base ? '<b>' + o.base + '</b> Ward plus ' : '') + '<b>' + (o.mult || 1) + '</b>' + (o.base ? '' : ' Ward') + ' per ' + PER_TXT[o.per]; break;
-        case 'apply': t = o.target === 'self' ? 'Gain <b>' + o.n + '</b> ' + sName(o.s) : 'Apply <b>' + o.n + '</b> ' + sName(o.s) + tgtTxt; break;
+        case 'apply':
+          t = o.target === 'self' ? 'Gain <b>' + o.n + '</b> ' + sName(o.s) : 'Apply <b>' + o.n + '</b> ' + sName(o.s) + tgtTxt;
+          if (o.n > 0) {
+            if (o.s === 'might' && o.target === 'self') ov.srcMight += o.n;
+            if (o.s === 'resolve' && o.target === 'self') ov.srcResolve += o.n;
+            if (o.s === 'torn' && o.target !== 'self') { if (o.target === 'all') ov.tornAll = true; else if (!o.target || o.target === 'enemy') ov.tornChosen = true; }
+          }
+          break;
         case 'doubleStatus': t = ((o.mult || 2) === 2 ? 'Double' : 'Multiply by ' + o.mult) + ' the ' + sName(o.s) + ' on ' + (o.target === 'all' ? 'ALL foes' : 'the target'); break;
         case 'removeStatus': t = (o.target && o.target !== 'self') ? 'Remove the ' + sName(o.s) + ' from ' + (o.target === 'all' ? 'ALL foes' : 'the target') : 'Remove your ' + sName(o.s); break;
         case 'draw': t = 'Draw <b>' + o.n + '</b> card' + (o.n === 1 ? '' : 's'); break;
@@ -1170,7 +1207,7 @@
         case 'heal': t = 'Heal <b>' + o.n + '</b> HP'; break;
         case 'loseHp': t = 'Lose <b>' + o.n + '</b> HP'; break;
         case 'addCard': t = 'Add ' + ((o.n || 1) > 1 ? o.n + ' ' : 'a ') + (o.up ? 'gilded ' : '') + cardName(o.id) + ' to your ' + ({ hand: 'hand', draw: 'draw pile', discard: 'discard pile' }[o.to || 'discard']); break;
-        case 'scrapeBlots': t = 'Scrape all Blots in your hand' + (o.draw ? ' and draw 1 card for each' : ''); break;
+        case 'scrapeBlots': t = o.short ? 'Scrape Blots in hand' + (o.draw ? '; draw 1 for each' : '') : 'Scrape all Blots in your hand' + (o.draw ? ' and draw 1 card for each' : ''); break; // short: tight Gloss cards
         case 'gildHand': t = 'Gild ' + (o.n === 'all' ? 'ALL cards' : plural(o.n || 1, 'random card')) + ' in your hand for this fight'; break;
         case 'createCard':
           var what = (o.rarity ? o.rarity + ' ' : 'random ') + (o.pig ? M.PIGMENTS[o.pig].name + ' ' : '') + (o.type || 'card');
@@ -1183,20 +1220,25 @@
           if (!ct && o.cond.indexOf('played:') === 0) ct = '<i>After ' + M.PIGMENTS[o.cond.split(':')[1]].name + ':</i>';
           if (!ct && o.cond.indexOf('goldAtLeast:') === 0) ct = 'If you have ' + o.cond.split(':')[1] + '+ silver,';
           if (!ct && o.cond.indexOf('wardAtLeast:') === 0) ct = 'If you have ' + o.cond.split(':')[1] + '+ Ward,';
-          t = ct + ' ' + lc(describeOps(o.then, ctx)) + (o.else && o.else.length ? '. Otherwise, ' + lc(describeOps(o.else, ctx)) : ''); break;
-        case 'repeat': t = describeOps(o.ops, ctx) + ' (' + o.n + ' times)'; break;
-        case 'nextTurn': t = 'Next turn, ' + lc(describeOps(o.ops, ctx)); break;
+          // every effect inside the condition belongs to it: "If X, do A and B" (never a bare trailing sentence)
+          var cp = function (x) { return { srcMight: x.srcMight, srcResolve: x.srcResolve, tornAll: x.tornAll, tornChosen: x.tornChosen }; };
+          var thenTxt = joinAnd(describeList(o.then, ctx, cp(ov)).map(lc));
+          t = ct + ' ' + thenTxt + (o.else && o.else.length ? '. Otherwise, ' + joinAnd(describeList(o.else, ctx, cp(ov)).map(lc)) : ''); break;
+        case 'repeat': t = describeList(o.ops, ctx, ov).join('. ') + ' (' + o.n + ' times)'; break;
+        case 'nextTurn': t = 'Next turn, ' + joinAnd(describeList(o.ops, ctx, { srcMight: 0, srcResolve: 0, tornAll: false, tornChosen: false }).map(lc)); break;
         case 'gold': t = (o.n >= 0 ? 'Gain ' : 'Lose ') + '<b>' + Math.abs(o.n) + '</b> silver'; break;
         default: t = '';
       }
       if (t) out.push(t);
     });
-    return out.join('. ');
+    return out;
   }
+  function joinAnd(a) { return a.length < 2 ? (a[0] || '') : a.length === 2 ? a[0] + ' and ' + a[1] : a.slice(0, -1).join(', ') + ', and ' + a[a.length - 1]; }
+  function describeOps(ops, ctx) { return describeList(ops, ctx).join('. '); }
   function lc(s) { return s ? s.charAt(0).toLowerCase() + s.slice(1) : s; }
   M.describeOps = describeOps;
 
-  function hookText(h) {
+  function hookText(h, ctx) {
     var w;
     var everyTxt = h.every ? 'every ' + ordinal(h.every) + ' time ' : '';
     switch (h.on) {
@@ -1216,7 +1258,7 @@
     }
     if (h.every && ['illuminate', 'play', 'hurt'].indexOf(h.on) < 0) w = w + ' (every ' + ordinal(h.every) + ' time)';
     void everyTxt;
-    return w + ', ' + lc(describeOps(h.ops));
+    return w + ', ' + lc(describeOps(h.ops, ctx));
   }
   function ordinal(n) { return n + (n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th'); }
   M.hookText = hookText;
@@ -1226,9 +1268,10 @@
     var d = cardDef(inst);
     if (d.text) return d.text;
     var parts = [];
-    var body = describeOps(d.ops, st && st.combat ? { st: st } : null);
+    var tctx = st && st.combat ? { st: st } : null;
+    var body = describeOps(d.ops, tctx);
     if (body) parts.push(body + '.');
-    if (d.gloss) (Array.isArray(d.gloss) ? d.gloss : [d.gloss]).forEach(function (h) { parts.push('<i>Gloss:</i> ' + hookText(h) + '.'); });
+    if (d.gloss) (Array.isArray(d.gloss) ? d.gloss : [d.gloss]).forEach(function (h) { parts.push('<i>Gloss:</i> ' + hookText(h, tctx) + '.'); });
     if (d.onDraw) parts.push('When drawn, ' + lc(describeOps(d.onDraw)) + '.');
     if (d.endTurn) parts.push('If in hand at end of turn, ' + lc(describeOps(d.endTurn)) + '.');
     var kw = [];

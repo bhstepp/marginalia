@@ -61,10 +61,11 @@ in hooks; `target:'all'` all foes, `'random'`, `'self'` = the source. For enemy-
 `'self'` = that enemy; `'allies'` = all living enemies.
 
 Combat ops:
-- `{op:'dmg', n, times?, target?}` attack damage (adds Might; Smudged ×0.75; target Torn ×1.5; Brambles retaliates)
+- `{op:'dmg', n, times?, target?}` attack damage (adds Might; Smudged ×0.75; target Torn ×1.5, rounding down after each step; Brambles retaliates)
 - `{op:'dmgPer', base?, mult?, per, times?, target?}` damage = base + mult × value(per).
-  `per` ∈ `targetCorrode, ward, played (cards played earlier this turn), margin, pigments, handSize, discard, might, blots, missingHp`
-- `{op:'ward', n, target?}` gain Ward (+Resolve for cards; Faded ×0.75). enemy: `target:'allies'` wards all foes.
+  `per` ∈ `targetCorrode, ward, played (cards played earlier this turn), margin, pigments, handSize, discard, might, blots, missingHp`.
+  If the computed base is 0 or less the hit is skipped entirely (Might does not leak in as free damage).
+- `{op:'ward', n, target?}` gain Ward: n + Resolve (cards, Glosses and relics all count), then Faded ×0.75 rounded down. enemy: `target:'allies'` wards all foes.
 - `{op:'wardPer', base?, mult?, per}`
 - `{op:'apply', s, n, target?}` add status stacks (negative n allowed).
 - `{op:'doubleStatus', s, mult?=2, target?}`, `{op:'removeStatus', s, target?='self'}`
@@ -84,7 +85,7 @@ gainCard {id}|{rarity}, relic {id}|{rarity}, gildRandom {n}, removeRandom {n}, c
 fight {enc:[enemyIds], kind:'battle'|'elite'}` (fight starts combat after the choice; rewards follow normally).
 
 ### Statuses (`M.STATUS`)
-might (+dmg/hit, permanent) · resolve (+Ward per card Ward gain) · corrode (lose N HP at own turn start, then −1) ·
+might (+dmg/hit, permanent) · resolve (+N Ward whenever you gain Ward from a card, Gloss or relic) · corrode (lose N HP at own turn start, then −1) ·
 smudged (−25% attack dmg, −1/turn) · torn (+50% dmg taken, −1/turn) · faded (−25% Ward gained, −1/turn) ·
 brambles (attackers take N) · mending (heal N at own turn end, −1/turn) · steadfast (Ward kept, −1/turn) ·
 zeal (gain N Might at own turn end) · shell (gain N Ward at own turn end) · parched (start next turn with N less Ink).
@@ -206,7 +207,7 @@ M.CHARACTERS.nun = { name:'Sister Anselma', short:'Nun', hp:66, art:'nun', order
 
 ## Rubrication (difficulty ladder) — `M.RUBRICS[i] = {name, desc}`; level N applies rules 1..N
 1 more elites · 2 normal foes +10% HP · 3 elites +15% HP & 1 Might · 4 Mend 25% · 5 bosses +12% HP · 6 start with Dog Ear ·
-7 normal foes 1 Might · 8 −20% silver · 9 heal 25% between Quires · 10 bosses 2 Might. Score × (1 + 0.1·level + 0.05·mods).
+7 normal foes (and minions) 1 Might · 8 −20% silver · 9 heal 25% between Quires · 10 bosses 1 Might. Score × (1 + 0.1·level + 0.05·mods).
 Per character, winning at level N unlocks N+1 (UI-tracked).
 
 ## Daily modifiers — `M.MODIFIERS[id] = {name, desc, passive?, hooks?, onRunStart?, enemyStart?, costSet?}`
@@ -226,3 +227,33 @@ Quire I: `jousting_hare` + `war_snail` (a DUO boss fought together: encounter `[
 (summons minion `dancing_fool`). Quire II: `basilisk` (petrifies), `siren` (devours Lapis cards with her song).
 Quire III: `hellmouth` (swallows cards and spits back Blots), `seraph` (four-faced; changes element/pattern by phase).
 Each act's boss list becomes 3 options; the map shows which boss guards the top.
+
+---------------------------------------------------------------------------------------------------
+# Math & text contract (enforced by `node tools/math_audit.js`)
+- **A number printed on a card must be the number it really does.** In combat `M.cardText(inst, st)` bakes in the live
+  state: Might/Smudged on the player, Resolve/Faded on Ward, and a Torn target (when every living foe is Torn). Changed
+  numbers are wrapped in `<b class="up">` / `<b class="down">`. With several foes of mixed Torn state the base number is shown.
+- **Sequence-aware text.** Effects an earlier op on the *same card* applies before a later op resolves are counted:
+  Couched Lance (Apply 2 Torn, then Deal 11) prints 16, Rabbit Punch prints 4×2, Vow of Silence (Gain 1 Resolve, then 5 Ward) prints 6.
+  Order your ops accordingly: the text follows the order in `ops`.
+- **Conditionals own everything inside them.** `iff(cond, [a, b])` prints "If X, a and b."
+- **Enemy intents** include Might/Smudged the move gives itself and Torn it puts on you before it strikes (Seraph's Lion).
+- Do not hand-write `text:` for a card that contains damage/Ward numbers (it freezes the number). Use `short:true` on a
+  `scrapeBlots` op if the auto-text is too long for a tight Gloss card.
+- Known design note: debuffs an enemy places on you decay at the end of that same round, so Torn 1 / Smudged 1 from a foe
+  has little or no effect on your next turn. Left as is to keep balance; raise to 2 if you want a move to bite.
+
+---------------------------------------------------------------------------------------------------
+# Diagnostics (`src/diag.js`, tests in `tools/diag_test.js`)
+- `M.diag.install()` wraps `M.act` (ui.js calls it at boot; Node tools only when they want a log). It never changes game
+  state or RNG: 400 seeded runs are bit-identical with it on.
+- Entry types (JSON lines): `fight` (foes + intents shown), `play` (card, printed text, cost, state before/after, hits,
+  Ward gained, statuses), `end` (each foe's move: intent shown vs damage dealt, state afterwards, next hand), `act` (map /
+  shop / reward / event choices), `resume`, `over`, `err`.
+- Auto-flags: `DMG` / `WARD` (first printed number on a card vs the real first hit / Ward gain), `INTENT` (enemy intent vs
+  damage dealt), `INV` (impossible values: HP above max, negative Ward, zero-stack statuses, oversized hand). An intent
+  that differs only because an earlier foe buffed itself/allies or debuffed you that round is recorded as a `note`, not a flag.
+- Skipped on purpose: cards with several foes in mixed Torn states (the printed base number can't know the target).
+- Storage: newest ~56 KB of entries in `localStorage['marginalia.diag.v1']`; `newRun` resets, `resume` keeps the log only
+  if seed + character + Rubrication match. Menu → Diagnostics → Copy report / View.
+- If you add a new op that changes a printed number, extend `describeList` (engine.js) and the audit will tell you if you forgot.

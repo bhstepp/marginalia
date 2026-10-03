@@ -2,7 +2,7 @@
 var fs = require('fs'), path = require('path');
 var S = function (f) { return path.join(__dirname, 'src', f); };
 var JS = ['engine.js', 'data/cards.js', 'data/relics.js', 'data/events.js', 'data/enemies.js', 'data/meta.js', 'data/char_nun.js', 'data/char_scribe.js', 'data/bosses2.js',
-  'art_icons.js', 'art_enemies1.js', 'art_enemies2.js', 'art_relics.js', 'art_chars.js', 'art_bosses2.js', 'ui.js'];
+  'art_icons.js', 'art_enemies1.js', 'art_enemies2.js', 'art_relics.js', 'art_chars.js', 'art_bosses2.js', 'diag.js', 'ui.js'];
 var js = JS.filter(function (f) { return fs.existsSync(S(f)); }).map(function (f) {
   return '/* ==== ' + f + ' ==== */\n' + fs.readFileSync(S(f), 'utf8');
 }).join('\n;\n');
