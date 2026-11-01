@@ -161,13 +161,19 @@
     var fd = lv.filter(function (l) { return l.o.op === 'dmg' || l.o.op === 'dmgPer'; })[0];
     if (fd && fd.top && fd.o.op === 'dmg' && fd.o.target !== 'random') {
       var m = /Deal (\d+) damage/.exec(cd.text), h0 = fx.filter(function (f) { return f.k === 'hit' && f.src === 'p'; })[0];
-      if (m && h0 && !cd.mixedTorn && h0.n + h0.blocked !== +m[1]) msgs.push('DMG ' + cd.id + ' printed ' + m[1] + ' but first hit was ' + (h0.n + h0.blocked));
+      // Illuminating fires its hooks (e.g. Silverpoint Stylus) BEFORE the card's own ops, so with ilm the card's hit may not be first
+      var hitOk = !m || (ilm ? fx.some(function (f) { return f.k === 'hit' && f.src === 'p' && f.n + f.blocked === +m[1]; }) : (h0 && h0.n + h0.blocked === +m[1]));
+      if (m && h0 && !cd.mixedTorn && !hitOk) msgs.push('DMG ' + cd.id + ' printed ' + m[1] + ' but first hit was ' + (h0.n + h0.blocked));
     }
     var fw = lv.filter(function (l) { return l.o.op === 'ward' || l.o.op === 'wardPer'; })[0];
     if (fw && fw.top && fw.o.op === 'ward' && fw.o.target !== 'allies') {
       var wm = /Gain (\d+) Ward/.exec(cd.text);
       if (wm && wards.length && wards[0] !== +wm[1]) msgs.push('WARD ' + cd.id + ' printed ' + wm[1] + ' but gained ' + wards[0]);
     }
+    // ---- Ink: shown cost vs what was actually spent (gains from Illuminate and 'ink' ops are added back)
+    var inkGain = fx.reduce(function (s, f) { return s + (f.k === 'ink' ? (f.n || 0) : 0) + (f.k === 'illuminate' ? 1 : 0); }, 0);
+    var inkWant = pre.me.ink - cd.cost + inkGain;
+    if (!c.over && c.ink !== inkWant) msgs.push('INK ' + cd.id + ' cost ' + cd.cost + ': ink ' + pre.me.ink + ' -> ' + c.ink + ' (expected ' + inkWant + ')');
     invariants(st).forEach(function (x) { msgs.push(x); });
     var e = {
       t: 'play', fl: st.floor, tn: c.turn, card: cd.id, cost: cd.cost, text: cd.text, me: pre.me, tgt: cd.tgt,

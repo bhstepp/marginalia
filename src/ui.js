@@ -1024,7 +1024,7 @@
     var anyPlayable = c.hand.some(function (x, k) { return M.canPlay(st, k); });
     qs('#cTray').innerHTML =
       '<button class="pile" id="pDraw" data-a="pile" data-p="draw">' + icon('draw_pile') + '<span class="n">' + c.draw.length + '</span><span class="t">draw</span></button>' +
-      '<div class="inkpot' + (c.ink ? '' : ' empty') + '" id="cInk" data-a="inkInfo" role="button" aria-label="' + c.ink + ' Ink">' + inkpotSvg() + '<div class="v">' + c.ink + '<small>/' + (M.CONST.BASE_INK + M.passive(st, 'ink')) + '</small></div></div>' +
+      '<div class="inkpot' + (c.ink ? '' : ' empty') + (parchedN() ? ' parched' : '') + '" id="cInk" data-a="inkInfo" role="button" aria-label="' + c.ink + ' Ink' + (parchedN() ? ', ' + parchedN() + ' less Ink next turn (Parched)' : '') + '">' + inkpotSvg() + '<div class="v">' + c.ink + '<small>/' + (M.CONST.BASE_INK + M.passive(st, 'ink')) + '</small></div>' + (parchedN() ? '<div class="nextInk">\u2212' + parchedN() + ' next turn</div>' : '') + '</div>' +
       '<button class="pile" id="pDisc" data-a="pile" data-p="discard">' + icon('discard_pile') + '<span class="n">' + c.discard.length + '</span><span class="t">discard</span></button>' +
       '<button class="pile" id="pScr" data-a="pile" data-p="scraped">' + icon('scraped') + '<span class="n">' + c.scraped.length + '</span><span class="t">scraped</span></button>' +
       '<button class="seal' + (!anyPlayable && !c.over ? ' glow' : '') + '" id="cSeal" data-a="endTurn"' + (c.over ? ' disabled' : '') + '>End<br>Turn</button>';
@@ -1038,6 +1038,8 @@
     if (t.length > 40) t = t.slice(0, 38).replace(/\s+\S*$/, '') + '…';
     return esc(t);
   }
+  // Parched is spent at the start of the next turn, so any Parched held now means less Ink next turn
+  function parchedN() { var c = st && st.combat; return c && !c.over ? (c.player.st.parched || 0) : 0; }
   function inkpotSvg() {
     return '<svg viewBox="0 0 58 58"><ellipse cx="29" cy="53" rx="20" ry="3.5" fill="#2a1f1a" opacity=".2"/>' +
       '<path d="M14 24c-4 6-5 20 0 26 8 5 22 5 30 0 5-6 4-20 0-26z" fill="#2a1f1a" stroke="#120c09" stroke-width="2"/>' +
@@ -1735,7 +1737,7 @@
     pile: function (el) { lastPile = el.getAttribute('data-p'); showPile(lastPile); },
     glossInfo: function (el) { var g = st.combat.margin[+el.getAttribute('data-idx')]; if (g) zoomCard(g, null, { ctx: true }); },
     illumInfo: function () { dialog('Illumination', '<p>' + esc(M.KEYWORDS.Illuminate) + '</p><p class="faded">Need: ' + M.illumNeed(st) + ' pigment' + (M.illumNeed(st) > 1 ? 's' : '') + '. ' + (st.combat.illum ? 'Thou hast Illuminated this turn.' : 'Progress this turn: ' + M.illumProgress(st) + '.') + '</p>', [{ label: 'Close', cls: 'primary' }]); },
-    inkInfo: function () { dialog('Ink', '<p>' + esc(M.KEYWORDS.Ink) + '</p>', [{ label: 'Close', cls: 'primary' }]); }
+    inkInfo: function () { var pn = parchedN(); dialog('Ink', '<p>' + esc(M.KEYWORDS.Ink) + '</p>' + (pn ? '<p class="faded"><b>Parched ' + pn + ':</b> thou wilt start next turn with ' + pn + ' less Ink.</p>' : ''), [{ label: 'Close', cls: 'primary' }]); }
   };
   var lastPile = 'draw';
   function rememberAsc() { prefs.asc = prefs.asc || {}; prefs.asc[ui.cs.char] = ui.cs.asc; savePrefs(); }
