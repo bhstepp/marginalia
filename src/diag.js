@@ -161,7 +161,9 @@
     var fd = lv.filter(function (l) { return l.o.op === 'dmg' || l.o.op === 'dmgPer'; })[0];
     if (fd && fd.top && fd.o.op === 'dmg' && fd.o.target !== 'random') {
       var m = /Deal (\d+) damage/.exec(cd.text), h0 = fx.filter(function (f) { return f.k === 'hit' && f.src === 'p'; })[0];
-      if (m && h0 && !cd.mixedTorn && h0.n + h0.blocked !== +m[1]) msgs.push('DMG ' + cd.id + ' printed ' + m[1] + ' but first hit was ' + (h0.n + h0.blocked));
+      // Illuminating fires its hooks (e.g. Silverpoint Stylus) BEFORE the card's own ops, so with ilm the card's hit may not be first
+      var hitOk = !m || (ilm ? fx.some(function (f) { return f.k === 'hit' && f.src === 'p' && f.n + f.blocked === +m[1]; }) : (h0 && h0.n + h0.blocked === +m[1]));
+      if (m && h0 && !cd.mixedTorn && !hitOk) msgs.push('DMG ' + cd.id + ' printed ' + m[1] + ' but first hit was ' + (h0.n + h0.blocked));
     }
     var fw = lv.filter(function (l) { return l.o.op === 'ward' || l.o.op === 'wardPer'; })[0];
     if (fw && fw.top && fw.o.op === 'ward' && fw.o.target !== 'allies') {
