@@ -5340,6 +5340,10 @@ up: { gloss: { on: 'turnStart', ops: [ward(6), { op: 'scrapeBlots', draw: true, 
       var wm = /Gain (\d+) Ward/.exec(cd.text);
       if (wm && wards.length && wards[0] !== +wm[1]) msgs.push('WARD ' + cd.id + ' printed ' + wm[1] + ' but gained ' + wards[0]);
     }
+    // ---- Ink: shown cost vs what was actually spent (gains from Illuminate and 'ink' ops are added back)
+    var inkGain = fx.reduce(function (s, f) { return s + (f.k === 'ink' ? (f.n || 0) : 0) + (f.k === 'illuminate' ? 1 : 0); }, 0);
+    var inkWant = pre.me.ink - cd.cost + inkGain;
+    if (!c.over && c.ink !== inkWant) msgs.push('INK ' + cd.id + ' cost ' + cd.cost + ': ink ' + pre.me.ink + ' -> ' + c.ink + ' (expected ' + inkWant + ')');
     invariants(st).forEach(function (x) { msgs.push(x); });
     var e = {
       t: 'play', fl: st.floor, tn: c.turn, card: cd.id, cost: cd.cost, text: cd.text, me: pre.me, tgt: cd.tgt,
